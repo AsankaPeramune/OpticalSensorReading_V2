@@ -1,12 +1,13 @@
 #include <Arduino.h>
-#include"rg15.h"
+#include <WiFi.h>
+#include "esp_bt.h"
+#include "rg15.h"
 
 // ---------- PINS (KEEP AS YOU REQUESTED) ----------
 #define SENSOR_RX_PIN   21   // ESP32 RX  <- RG-15 TX
 #define SENSOR_TX_PIN   22   // ESP32 TX  -> RG-15 RX
 #define RADIO_RX_PIN    16   // ESP32 RX  <- Radio TX
 #define RADIO_TX_PIN    17   // ESP32 TX  -> Radio RX
-
 
 // ---------- BAUD RATES ----------
 #define RG_BAUD     9600
@@ -26,13 +27,8 @@ char rgLine[64];
 
 // ---------------- REQUEST RAIN FROM RG-15 ----------------
 bool readRainAccumLine(char *out, size_t maxLen) {
-  // Flush old bytes so we don't read stale lines
-  while (Serial1.available()) Serial1.read();
-
-  // RG-15 command for accumulated rainfall is "A"
+  while (Serial1.available()) Serial1.read();  // flush old bytes
   Serial1.print("A\r\n");
-
-  // Read response line (adjust timeout if needed)
   return readRG15Line(out, maxLen, 1500);
 }
 
@@ -46,11 +42,7 @@ void sendToRadio(const char *payloadLine) {
 }
 
 // ---------------- PROCESS ONE FULL RADIO LINE ----------------
-// Expected incoming Meshtastic-style line often looks like:
-//   "12345678: RF1:RAIN?"
-// We parse it like your water-level code: [radioPrefix]: [KEY]:[CMD]
 void handleRadioLine(char *line) {
-  // Debug raw
   Serial.print("From FloodSerial RAW: [");
   Serial.print(line);
   Serial.println("]");
@@ -85,10 +77,9 @@ void handleRadioLine(char *line) {
   Serial.println(cmd);
 
   // STEP 4: commands
-  if (strncmp(cmd, "RAIN?", 5) == 0) {
+  if (strncmp(cmd, "ABCD?", 5) == 0) {
     if (readRainAccumLine(rgLine, sizeof(rgLine))) {
-      // rgLine example: "Acc  0.00 mm"
-      sendToRadio(rgLine);
+      sendToRadio(rgLine);   // e.g. "Acc  0.00 mm"
     } else {
       sendToRadio("ERR");
     }
@@ -97,9 +88,12 @@ void handleRadioLine(char *line) {
   }
 }
 
-// ---------------- READ RADIO STREAM (LIKE YOUR FIRST CODE) ----------------
-void processRadioCommand() {
+// ---------------- READ RADIO STREAM ----------------
+bool processRadioCommandOnce() {
+  bool didSomething = false;
+
   while (Serial2.available()) {
+    didSomething = true;
     char c = (char)Serial2.read();
 
     if (c == '\n' || c == '\r') {
@@ -114,15 +108,26 @@ void processRadioCommand() {
       if (radioIdx < sizeof(radioBuf) - 1) {
         radioBuf[radioIdx++] = c;
       } else {
-        // overflow protection
-        radioIdx = 0;
+        radioIdx = 0; // overflow protection
       }
     }
   }
+
+  return didSomething;
 }
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
+
+  // ----------- BIG POWER SAVERS -----------
+  // Turn off WiFi + Bluetooth (if not used)
+  WiFi.mode(WIFI_OFF);
+  btStop();
+  esp_bt_controller_disable();
+
+  // Lower CPU frequency (safe and effective)
+  setCpuFrequencyMhz(80);  // default is often 240 MHz
 
   // RG-15 UART
   Serial1.begin(RG_BAUD, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
@@ -132,11 +137,15 @@ void setup() {
 
   delay(300);
 
-  Serial.println("RG-15 on-demand reader started");
-  Serial.println("Send command over radio: RF1:RAIN?");
+  Serial.println("RG-15 on-demand reader started (safe low-power idle)");
+  Serial.println("Send command over radio: 12345678: RF1:RAIN?");
 }
 
 void loop() {
-  // Only act when command comes from radio
-  processRadioCommand();
+  bool got = processRadioCommandOnce();
+
+  // If nothing arrived, idle gently (reduces CPU use a lot)
+  if (!got) {
+    delay(20);  // low-power-ish idle without breaking UART
+  }
 }
